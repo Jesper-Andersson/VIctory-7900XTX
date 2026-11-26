@@ -158,6 +158,18 @@ thread_local! {
     /// milliseconds and the bytes that run may take, in place of the
     /// pass's own per frame.
     static PASS_BUDGET: std::cell::Cell<Option<(u64, u64, bool)>> = const { std::cell::Cell::new(None) };
+    /// Why the last `State::bind` or `State::prepare_for` on this thread
+    /// gave false (diagnostics): the drop reason of an indirect draw or
+    /// dispatch names it.
+    #[cfg(feature = "diagnostics")]
+    static NOT_BOUND: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
+}
+
+/// False, noting `why` a draw or dispatch was not prepared (diagnostics).
+fn not_bound(_why: &'static str) -> bool {
+    #[cfg(feature = "diagnostics")]
+    NOT_BOUND.set(_why);
+    false
 }
 
 /// The milliseconds of every frame the pass that uploads textures picked
@@ -1437,14 +1449,14 @@ impl State {
     fn prepare_for(&mut self, list: &HostList, indexed: bool, mesh: bool) -> bool {
         #[cfg(feature = "diagnostics")]
         if crate::pipeline::is_skipped(self.pipeline as This) {
-            return false;
+            return not_bound("pipeline skipped");
         }
         let Some(p) = crate::pipeline::host_pipeline(self.pipeline as This) else {
-            return false;
+            return not_bound("no host pipeline");
         };
         if p.compute || p.mesh != mesh {
             once!(mesh, "a draw or mesh dispatch with another kind of pipeline");
-            return false;
+            return not_bound("another kind of pipeline");
         }
         if p.rects && self.topology != RECTANGLES {
             // Its geometry stage would turn each triangle into a rectangle.
@@ -1484,7 +1496,7 @@ impl State {
         if indexed {
             let v = self.index;
             let Some(shadow) = crate::shadow::find_any(v.address, u64::from(v.size)) else {
-                return false;
+                return not_bound("index buffer outside title buffers");
             };
             shadow.refresh(list, v.address, u64::from(v.size));
             let view = D3D12_INDEX_BUFFER_VIEW {
@@ -1629,7 +1641,7 @@ impl State {
             STORES.set(true);
             if made.iter().any(|m| m.1 == u32::MAX) {
                 once!("a draw whose descriptor table found no free slots is dropped");
-                return false;
+                return not_bound("descriptor table: no free slots");
             }
             if stage.shader.ambient.is_some() || stage.shader.probe.is_some() {
                 self.ambient_tables.clear();
@@ -1650,7 +1662,7 @@ impl State {
                 };
                 let Some(ready) = self.memory_ready(list, t, compute, use_) else {
                     once!("a shader that reads title memory by address without a view heap to hold its views: the draw is dropped");
-                    return false;
+                    return not_bound("title memory by address: no view heap");
                 };
                 Some(ready)
             } else {
@@ -1857,7 +1869,7 @@ impl State {
         if !crate::pipeline::host::bounded_root_srvs() {
             let Some((a, s)) = address.and_then(|a| Some((a, find(a)?))) else {
                 once!("a root UAV with nothing to bind: the draw is dropped");
-                return false;
+                return not_bound("root UAV: nothing to bind");
             };
             ready(a, &s);
             // From the 16 bytes below: the shader adds the rest.
@@ -1880,7 +1892,7 @@ impl State {
         };
         let Some((heap, host)) = heap.and_then(|h| Some((h, h.host()?))) else {
             once!("a root UAV without a bound view heap: the draw is dropped");
-            return false;
+            return not_bound("root UAV: no view heap");
         };
         let key = (std::ptr::from_ref(heap) as usize, address.unwrap_or(0));
         let (index, shadow) = match self.root_uav_slots.get(&key) {
@@ -1888,7 +1900,7 @@ impl State {
             None => {
                 let shadow = address.and_then(|a| find(a).map(|s| (a, s)));
                 let Some(index) = host.dynamic(1) else {
-                    return false;
+                    return not_bound("root UAV: no free slot");
                 };
                 self.dynamic.push((key.0, index, 1));
                 if let Some((a, s)) = &shadow {
@@ -1946,7 +1958,7 @@ impl State {
         };
         let Some((heap, host)) = heap.and_then(|h| Some((h, h.host()?))) else {
             once!("a root SRV without a bound view heap: the draw is dropped");
-            return false;
+            return not_bound("root SRV: no view heap");
         };
         // A view that begins early is another view than one that does not
         // (title addresses stay below bit 63).
@@ -1959,7 +1971,7 @@ impl State {
             None => {
                 let shadow = address.and_then(|a| crate::shadow::find(a, 1).map(|s| (a, s)));
                 let Some(index) = host.dynamic(1) else {
-                    return false;
+                    return not_bound("root SRV: no free slot");
                 };
                 self.dynamic.push((key.0, index, 1));
                 self.root_srv_slots
@@ -4133,6 +4145,8 @@ impl State {
                 (bounded, 0)
             }
         };
+        #[cfg(feature = "diagnostics")]
+        NOT_BOUND.set("");
         let ran = match kind {
             DRAW | INDEXED => self.prepare(list, kind == INDEXED),
             MESH => self.prepare_for(list, false, true),
@@ -4140,6 +4154,9 @@ impl State {
             _ => false,
         };
         if !ran {
+            #[cfg(feature = "diagnostics")]
+            why(&format!("prepare failed ({})", NOT_BOUND.get()));
+            #[cfg(not(feature = "diagnostics"))]
             why("prepare failed");
             return false;
         }
