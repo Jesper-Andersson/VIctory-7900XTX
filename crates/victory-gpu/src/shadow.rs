@@ -3246,6 +3246,9 @@ impl Shadow {
         // inside this one with a copy of its own, a texture in it) is not
         // told: the card's writes are not seen by write watching.
         if self.place.is_some() {
+            // Diagnostics (#379): counted where the CPU reads it too early.
+            #[cfg(feature = "diagnostics")]
+            list.note_in_place_write(address as usize, len.min(self.left(address)) as usize);
             return;
         }
         self.written.store(true, Ordering::Relaxed);

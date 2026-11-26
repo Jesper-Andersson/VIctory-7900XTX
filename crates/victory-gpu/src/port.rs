@@ -309,6 +309,40 @@ pub(crate) fn log(frames: f64) {
         s[6],
         s[7],
     );
+    #[cfg(feature = "diagnostics")]
+    {
+        let t: Vec<f64> = STALE.iter().map(|s| s.swap(0, Ordering::Relaxed) as f64 / frames).collect();
+        tracing::info!(
+            "renderer port 1, reads too early (#379), per frame: {:.0} steps on the CPU touching memory in place; of them {:.1} read bytes \
+             a flight not finished may write in place ({:.1} KB), {:.1} read bytes a list ahead in the same submission writes in place \
+             ({:.1} KB), {:.1} copies write where those write; flights writing in place not finished when a submission is prepared: {:.2} \
+             (VICTORY_SUBMIT_FRAMES {})",
+            t[0],
+            t[1],
+            t[2] / 1024.0,
+            t[3],
+            t[4] / 1024.0,
+            t[5],
+            t[6] / t[7].max(1e-9),
+            std::env::var("VICTORY_SUBMIT_FRAMES").unwrap_or_else(|_| "1".into()),
+        );
+    }
+}
+
+/// Diagnostics (#379): steps done on the CPU that touch memory in place (0);
+/// that read bytes a flight not finished writes in place (1: steps, 2:
+/// bytes); that read bytes a list ahead in the same submission writes in
+/// place (3, 4); copies writing where either writes (5); the flights
+/// writing in place not finished, summed over submissions (6); submissions
+/// looked at (7).
+#[cfg(feature = "diagnostics")]
+pub(crate) static STALE: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+
+/// Whether `[at, at + len)` touches memory in place (a quick look: the
+/// bounds of the regions).
+#[cfg(feature = "diagnostics")]
+pub(crate) fn touches_placed(at: usize, len: usize) -> bool {
+    touches(at, len)
 }
 
 #[cfg(test)]

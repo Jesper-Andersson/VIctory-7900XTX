@@ -2454,6 +2454,13 @@ struct Deferred {
     /// indirect arguments; 0 if none. It stays readable until the next
     /// clamp into it ([`HostList::indirect_state`]).
     indirect_readable: usize,
+    /// Diagnostics (#379): title memory used in place (renderer port #1)
+    /// that the list's shaders may write, as (the number of steps recorded
+    /// before it, address, end). Nothing waits on these writes
+    /// (`Shadow::gpu_writes`); [`Host::in_place_stale`] counts the CPU's
+    /// reads they may make stale.
+    #[cfg(feature = "diagnostics")]
+    in_place_written: Vec<(usize, usize, usize)>,
 }
 
 impl Deferred {
@@ -2916,6 +2923,77 @@ fn join_ranges(ranges: &mut Vec<(usize, usize)>, more: impl IntoIterator<Item = 
         }
     }
     *ranges = out;
+}
+
+/// Diagnostics (#379): per flight sent, the value signalled on the host's
+/// fence behind it and the title memory in place (renderer port #1) its
+/// shaders may write (joined). Kept until the card has passed the value.
+#[cfg(feature = "diagnostics")]
+static IN_PLACE_AIR: Mutex<Vec<(u64, Vec<(usize, usize)>)>> = Mutex::new(Vec::new());
+
+#[cfg(feature = "diagnostics")]
+impl Host {
+    /// Diagnostics (#379): counts the steps of `runs` done on the CPU (not
+    /// `taken` to the card) that read title memory in place which shaders
+    /// may still write: a flight the card has not finished, or a list of
+    /// this submission ahead of the step (the CPU's steps are all done
+    /// before any of its lists runs). Shader writes in place are declared
+    /// nowhere (`Shadow::gpu_writes`), so nothing waits for them; the bytes
+    /// read are the ones from before those writes. Counted in
+    /// [`crate::port::STALE`] for the frame line.
+    fn in_place_stale(&self, runs: &[&HostList], taken: impl Fn(&HostList, usize) -> bool) {
+        use crate::port::STALE;
+        // SAFETY: a plain query.
+        let completed = unsafe { self.fence.GetCompletedValue() };
+        let (air, flights) = {
+            let mut all = IN_PLACE_AIR.lock().unwrap_or_else(|e| e.into_inner());
+            all.retain(|(fence, _)| *fence > completed);
+            let mut joined = Vec::new();
+            join_ranges(&mut joined, all.iter().flat_map(|(_, r)| r.iter().copied()));
+            (joined, all.len())
+        };
+        STALE[6].fetch_add(flights as u64, Ordering::Relaxed);
+        STALE[7].fetch_add(1, Ordering::Relaxed);
+        // What lists of this submission ahead of the one looked at write.
+        let mut ahead: Vec<(usize, usize)> = Vec::new();
+        for &list in runs {
+            let deferred = list.deferred();
+            let mine = &deferred.in_place_written;
+            for (i, step) in deferred.copies.iter().enumerate() {
+                let (src, len, dst) = match *step {
+                    Step::Fill(_, src, len, _) => (src, len, None),
+                    Step::Copy(dst, src, len) => (src, len, Some(dst)),
+                    _ => continue,
+                };
+                let reads = crate::port::touches_placed(src, len);
+                let writes = dst.is_some_and(|dst| crate::port::touches_placed(dst, len));
+                if !(reads || writes) || taken(list, i) {
+                    continue;
+                }
+                STALE[0].fetch_add(1, Ordering::Relaxed);
+                let before_here = |from: usize, to: usize| {
+                    touches(&ahead, from, to) || mine.iter().any(|&(at, a, b)| at <= i && a < to && from < b)
+                };
+                if reads {
+                    if touches(&air, src, src + len) {
+                        STALE[1].fetch_add(1, Ordering::Relaxed);
+                        STALE[2].fetch_add(len as u64, Ordering::Relaxed);
+                    } else if before_here(src, src + len) {
+                        STALE[3].fetch_add(1, Ordering::Relaxed);
+                        STALE[4].fetch_add(len as u64, Ordering::Relaxed);
+                    }
+                }
+                if let Some(dst) = dst.filter(|_| writes)
+                    && (touches(&air, dst, dst + len) || before_here(dst, dst + len))
+                {
+                    STALE[5].fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            let written: Vec<(usize, usize)> = mine.iter().map(|w| (w.1, w.2)).collect();
+            drop(deferred);
+            join_ranges(&mut ahead, written);
+        }
+    }
 }
 
 /// Whether anything is in the air.
@@ -5413,6 +5491,20 @@ impl Host {
             return;
         };
         let told = !sent.writes.is_empty();
+        // Diagnostics (#379): the title memory in place its shaders may
+        // write, until the card has passed its fence value.
+        #[cfg(feature = "diagnostics")]
+        if crate::port::on() {
+            let mut ranges = Vec::new();
+            for &i in &order {
+                let written: Vec<(usize, usize)> =
+                    lists[i].host().deferred().in_place_written.iter().map(|w| (w.1, w.2)).collect();
+                join_ranges(&mut ranges, written);
+            }
+            if !ranges.is_empty() {
+                IN_PLACE_AIR.lock().unwrap_or_else(|e| e.into_inner()).push((*submitted, ranges));
+            }
+        }
         let sizes = crate::memory::asked_sizes(order.iter().map(|&i| lists[i].host()));
         let most = {
             let mut line = line();
@@ -5859,6 +5951,10 @@ impl Host {
         split.part(1);
         // What flights in the air may write.
         let air = line().written.clone();
+        #[cfg(feature = "diagnostics")]
+        if crate::port::on() {
+            self.in_place_stale(runs, |list, i| own.as_ref().is_some_and(|own| own.takes(list, i)));
+        }
         stage.next("submit: refreshes ahead of writes");
         if refresh_front() {
             batch.refresh_front(runs, &parts);
@@ -7255,6 +7351,17 @@ impl HostList {
             deferred
                 .copies
                 .push(Step::Refresh(shadow.clone(), address, len));
+        }
+    }
+
+    /// Diagnostics (#379): shaders of the list may write
+    /// `[address, address + len)` of title memory used in place.
+    #[cfg(feature = "diagnostics")]
+    pub(crate) fn note_in_place_write(&self, address: usize, len: usize) {
+        let mut deferred = self.deferred();
+        let at = deferred.copies.len();
+        if deferred.in_place_written.last() != Some(&(at, address, address + len)) {
+            deferred.in_place_written.push((at, address, address + len));
         }
     }
 
