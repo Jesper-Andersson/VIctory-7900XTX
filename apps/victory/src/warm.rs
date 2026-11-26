@@ -73,10 +73,14 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
     // (Read back by the runs: these are made beside the others, not before.)
     let slow_out = Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open(dir.join("slow-pipelines.txt"))?);
     let bad_out = Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open(&bad_file)?);
+    // What the workers log (why a pipeline has no host pipeline: the host's or the translator's
+    // error), the newest at the end.
+    let log_file = dir.join("warm-log.txt");
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_file)?;
     run_batches(
         &all,
         jobs,
-        start_worker,
+        |these| start_worker(these, &log),
         |n, ms, there| {
             if ms >= SLOW_MS {
                 let _ = writeln!(lock(&slow_out), "\n{} {ms:.0}", keys[n]);
@@ -110,6 +114,9 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
         times.last().copied().unwrap_or(0.0),
         times.iter().sum::<f64>() / 1e3
     );
+    if refused > 0 {
+        println!("why: {}", log_file.display());
+    }
     Ok(())
 }
 
@@ -163,16 +170,23 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn start_worker(these: &[usize]) -> Result<Child> {
+/// A worker for `these`; what it logs goes to the end of `log`.
+fn start_worker(these: &[usize], log: &std::fs::File) -> Result<Child> {
     use std::os::windows::process::CommandExt;
     const IDLE_PRIORITY_CLASS: u32 = 0x40;
     let exe = std::env::current_exe().context("could not locate the warm worker executable")?;
     let list: Vec<String> = these.iter().map(usize::to_string).collect();
-    Command::new(&exe)
+    let mut command = Command::new(&exe);
+    // Warnings only (every pipeline made is an info line), unless asked for more.
+    if std::env::var_os("VICTORY_LOG").is_none() {
+        command.env("VICTORY_LOG", "warn");
+    }
+    command
         .args(["warm", "--these", &list.join(",")])
+        .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(log.try_clone().context("could not share the warm log")?)
         .creation_flags(IDLE_PRIORITY_CLASS)
         .spawn()
         .with_context(|| format!("could not spawn {}", exe.display()))
@@ -233,6 +247,10 @@ fn make(dir: &Path, these: &str) -> Result<()> {
     victory_hle::known_pipelines::use_translations(cfg.cache_subdir("shaders")?);
     let mut out = std::io::stdout();
     known::make(dir, &these, |n, came| {
+        if let Some((_, false)) = came {
+            // (In the warm log, after what the host or the translator said of it.)
+            tracing::warn!(pipeline = n, "no host pipeline made");
+        }
         let told = match came {
             None => writeln!(out, "at {n}"),
             Some((ms, there)) => writeln!(out, "made {n} {ms:.2} {}", u8::from(there)),
