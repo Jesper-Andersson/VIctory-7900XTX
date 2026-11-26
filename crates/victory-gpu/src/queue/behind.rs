@@ -325,6 +325,7 @@ impl<W: Work> Lane<W> {
             }
         }
         let Some(&(first, ..)) = heads.first() else {
+            crate::host::translating(false);
             return false;
         };
         let ready = heads.iter().find(|(number, _, ask, shows)| match ask {
@@ -340,6 +341,9 @@ impl<W: Work> Lane<W> {
                 // frames (`super::present`). (Not while there is work whose
                 // parts are not known: it may be what is waited for.)
                 if folded {
+                    // For the card's clock: the line stands at lists still
+                    // being translated, not at the title.
+                    crate::host::translating(true);
                     return false;
                 }
                 let state = self.lock();
@@ -360,6 +364,7 @@ impl<W: Work> Lane<W> {
             state.running = Some(entry.queue);
             entry
         };
+        crate::host::translating(false);
         let (shows, mut runs) = (entry.what.shows(), usize::from(entry.what.runs()));
         // The highest mark of what it is made of (renderer port #7).
         let mut mark = entry.mark;

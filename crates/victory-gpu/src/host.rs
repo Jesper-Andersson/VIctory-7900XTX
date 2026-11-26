@@ -758,7 +758,38 @@ static COPY_BACK: [std::sync::atomic::AtomicU64; 2] =
 /// the clock's own ([`Host::card_sent`]). A thread of the clock waits for
 /// the newest signal and notes the moment the card reached it with nothing
 /// newer sent; the next send ends that idle stretch.
-static CARD_CLOCK_US: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+/// The fourth: how much of the idle time the line of submissions stood at
+/// lists still being translated (`crate::list::thin`; [`translating`]),
+/// which is not the title's not having submitted.
+static CARD_CLOCK_US: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+/// Of the thread that serves the line of submissions (`crate::queue::behind`):
+/// the microseconds it has stood so far with nothing free to go but lists
+/// still being translated, and since when it stands so now ([`now_us`] plus
+/// one; 0: it does not).
+static TRANSLATING: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
+/// The line of submissions starts (`on`) or stops standing at lists still
+/// being translated.
+pub(crate) fn translating(on: bool) {
+    // (One thread calls this; a start while it stands keeps the stretch.)
+    let since = TRANSLATING[1].load(Ordering::Relaxed);
+    if on {
+        if since == 0 {
+            TRANSLATING[1].store(now_us() + 1, Ordering::Relaxed);
+        }
+    } else if since != 0 {
+        TRANSLATING[0].fetch_add((now_us() + 1).saturating_sub(since), Ordering::Relaxed);
+        TRANSLATING[1].store(0, Ordering::Relaxed);
+    }
+}
+
+/// [`TRANSLATING`] as of now: microseconds stood so far.
+fn translated() -> u64 {
+    let since = TRANSLATING[1].load(Ordering::Relaxed);
+    let now = if since != 0 { (now_us() + 1).saturating_sub(since) } else { 0 };
+    TRANSLATING[0].load(Ordering::Relaxed) + now
+}
 
 /// Of the thread that holds the submission lock: the microseconds it has
 /// worked so far (preparing, copying back; not its waits for the card), and
@@ -794,7 +825,7 @@ struct CardClock {
     fence: ID3D12Fence,
     /// Signals sent so far; and, while the card has reached the last of
     /// them, since when and what [`worked`] said then.
-    state: Mutex<(u64, Option<(std::time::Instant, u64)>)>,
+    state: Mutex<(u64, Option<(std::time::Instant, u64, u64)>)>,
     sent: std::sync::Condvar,
 }
 
@@ -828,7 +859,7 @@ fn card_clock_watch(clock: &'static CardClock) {
         seen = target;
         let mut state = clock.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.0 == target && state.1.is_none() {
-            state.1 = Some((std::time::Instant::now(), worked()));
+            state.1 = Some((std::time::Instant::now(), worked(), translated()));
         }
     }
 }
@@ -836,11 +867,12 @@ fn card_clock_watch(clock: &'static CardClock) {
 /// For the frame-rate line: [`CARD_CLOCK_US`] per frame, `ms` being the
 /// frame's time.
 fn card_clock_line(frames: f64, ms: f64) {
-    let [idle, behind, stood] = [0, 1, 2].map(|i| CARD_CLOCK_US[i].swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames);
+    let [idle, behind, stood, lists] = [0, 1, 2, 3].map(|i| CARD_CLOCK_US[i].swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames);
     tracing::info!(
         "the card's clock per frame: nothing of ours queued {idle:.1} ms (the card about {:.0}% busy by this count), \
-         {behind:.1} ms of that while the submitting thread was working (the card idle behind us), the rest while the title \
-         had not submitted; the submitting thread stood waiting for the card {stood:.1} ms",
+         {behind:.1} ms of that while the submitting thread was working (the card idle behind us), {lists:.1} ms while the \
+         line of submissions stood at lists still being translated (VICTORY_THIN), the rest while the title had not \
+         submitted; the submitting thread stood waiting for the card {stood:.1} ms",
         if ms > 0.0 { (100.0 * (1.0 - idle / ms)).clamp(0.0, 100.0) } else { 0.0 }
     );
 }
@@ -4313,9 +4345,10 @@ impl Host {
         state.0 += 1;
         // SAFETY: our queue and the clock's fence.
         let _ = unsafe { self.queue.Signal(&clock.fence, state.0) };
-        if let Some((since, worked_then)) = state.1.take() {
+        if let Some((since, worked_then, translated_then)) = state.1.take() {
             CARD_CLOCK_US[0].fetch_add(since.elapsed().as_micros() as u64, Ordering::Relaxed);
             CARD_CLOCK_US[1].fetch_add(worked().saturating_sub(worked_then), Ordering::Relaxed);
+            CARD_CLOCK_US[3].fetch_add(translated().saturating_sub(translated_then), Ordering::Relaxed);
         }
         drop(state);
         clock.sent.notify_one();
