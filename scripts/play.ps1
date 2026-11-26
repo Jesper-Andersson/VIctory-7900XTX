@@ -22,6 +22,8 @@ if ($Safe) {
     $settings.VICTORY_UNDER_WIDE = '0'; $settings.VICTORY_LAND_ECHO = '0'
 } else {
     $settings.VICTORY_THIN = '1'; $settings.VICTORY_JOIN_PARTS = '8'; $settings.VICTORY_UPLOAD_AHEAD = '1'
+    # Two frames in the line of submissions: the title records the next while ours sends this one (RTX 2070 SUPER, Series S: 179 -> 164 ms median, p90 260 -> 210)
+    $settings.VICTORY_SUBMIT_FRAMES = '2'
 }
 if ($RayTracing) { $settings.VICTORY_BVH_BUILDER = '1' }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
