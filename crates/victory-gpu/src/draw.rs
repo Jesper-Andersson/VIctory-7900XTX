@@ -154,6 +154,11 @@ thread_local! {
     /// While a stage's tables are walked (`State::tables`): whether that
     /// stage's shader can store to buffers (`Translated::stores`).
     static STORES: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// Diagnostics, while a stage's tables are walked: that stage's shader
+    /// (its address; 0 otherwise), for what declares shader writes
+    /// (`crate::host::declared_by`).
+    #[cfg(feature = "diagnostics")]
+    static DECLARER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// While `State::early_textures` runs the texture pass: the
     /// milliseconds and the bytes that run may take, in place of the
     /// pass's own per frame.
@@ -1700,11 +1705,15 @@ impl State {
         for stage in &p.stages {
             let t = stage.translated();
             STORES.set(t.stores);
+            #[cfg(feature = "diagnostics")]
+            DECLARER.set(std::sync::Arc::as_ptr(&stage.shader) as usize);
             if t.stores && crate::picked::on() && crate::picked::picks(&stage.shader, &t.picks) {
                 crate::picked::runs_in(list);
             }
             let made = self.tables(list, &t.tables, compute);
             STORES.set(true);
+            #[cfg(feature = "diagnostics")]
+            DECLARER.set(0);
             if made.iter().any(|m| m.1 == u32::MAX) {
                 once!("a draw whose descriptor table found no free slots is dropped");
                 return false;
@@ -1929,6 +1938,8 @@ impl State {
             if writes {
                 #[cfg(feature = "diagnostics")]
                 crate::host::wide_write(a, len, self.pipeline);
+                #[cfg(feature = "diagnostics")]
+                crate::host::declared_by(a, len, 1, self.pipeline);
                 s.gpu_writes(list, a, len);
             }
         };
@@ -4513,6 +4524,8 @@ fn readable(list: &HostList, kind: ResourceType, view: &View) {
             if STORES.get() || !write_skip() {
                 #[cfg(feature = "diagnostics")]
                 crate::host::wide_write(address, len, 0);
+                #[cfg(feature = "diagnostics")]
+                crate::host::declared_by(address, len, 0, DECLARER.get());
                 shadow.gpu_writes(list, address, len);
             } else {
                 #[cfg(feature = "diagnostics")]

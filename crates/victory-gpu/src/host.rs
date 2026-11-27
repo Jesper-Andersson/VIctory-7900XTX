@@ -3030,6 +3030,145 @@ pub(crate) fn wide_write(address: u64, len: u64, pipeline: usize) {
     e.0 += 1;
 }
 
+/// Diagnostics: shader writes declared over a megabyte or more, by range
+/// (from, to), by how (0 a view in a table, 1 a root view) and by what
+/// declared it (a shader's address, or a pipeline's): how often. And the
+/// names of those: their shaders' hashes, whether they can store to buffers
+/// at all, and whether by raw addresses.
+#[cfg(feature = "diagnostics")]
+type Declarers = std::collections::HashMap<(usize, usize, u8, usize), u64>;
+#[cfg(feature = "diagnostics")]
+static DECLARERS: Mutex<Option<(Declarers, std::collections::HashMap<(u8, usize), (String, bool, bool)>)>> = Mutex::new(None);
+
+/// Diagnostics: a draw or dispatch declares that its shaders write `len`
+/// bytes at `address` (for the line of the largest declared ranges and
+/// what declares them, [`declarers_line`]): through a view in a table of a
+/// stage whose shader is at `id` (`how` 0; 0 if not known), or through a
+/// root view of the pipeline `id` (`how` 1). Only with
+/// `VICTORY_WRITE_DECLARERS=1`: off, it costs a load of a flag.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn declared_by(address: u64, len: u64, how: u8, id: usize) {
+    if len < 1 << 20 || !declarers_on() {
+        return;
+    }
+    declared(address, len, how, id);
+}
+
+/// Whether [`declared_by`] counts (`VICTORY_WRITE_DECLARERS=1`; off by
+/// default, read once).
+#[cfg(feature = "diagnostics")]
+fn declarers_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_WRITE_DECLARERS").is_some_and(|v| v == "1"))
+}
+
+/// [`declared_by`] with the switch on.
+#[cfg(feature = "diagnostics")]
+fn declared(address: u64, len: u64, how: u8, id: usize) {
+    if len < 1 << 20 {
+        return;
+    }
+    let mut all = DECLARERS.lock().unwrap_or_else(|e| e.into_inner());
+    let (counts, names) = all.get_or_insert_with(Default::default);
+    *counts.entry((address as usize, (address + len) as usize, how, id)).or_default() += 1;
+    names.entry((how, id)).or_insert_with(|| match (how, id) {
+        (_, 0) => ("not known".into(), true, true),
+        (0, shader) => {
+            // SAFETY: the shader of the stage whose tables are being made:
+            // its pipeline holds it through this call (`State::bind`).
+            let shader = unsafe { &*(shader as *const crate::pipeline::Shader) };
+            let t = shader.translated();
+            (shader.hash.clone(), t.is_none_or(|t| t.stores), t.is_none_or(|t| t.stores_by_address))
+        }
+        (_, pipeline) => crate::pipeline::host_pipeline(pipeline as crate::object::This).map_or_else(
+            || ("a pipeline gone".into(), true, true),
+            |p| {
+                let hashes: Vec<String> = p.stages.iter().map(|s| s.shader.hash.clone()).collect();
+                let t = p.stages.iter().map(|s| s.translated());
+                let (stores, by_address) = t.fold((false, false), |(a, b), t| (a || t.stores, b || t.stores_by_address));
+                (hashes.join("+"), stores, by_address)
+            },
+        ),
+    });
+}
+
+/// The ranges [`declared_by`] took most bytes of, per frame, and what
+/// declared each (`frames` since the last line).
+#[cfg(feature = "diagnostics")]
+pub(crate) fn declarers_line(frames: f64) {
+    let Some((counts, names)) = DECLARERS.lock().unwrap_or_else(|e| e.into_inner()).as_mut().map(|(c, n)| (std::mem::take(c), n.clone())) else {
+        return;
+    };
+    if counts.is_empty() || frames <= 0.0 {
+        return;
+    }
+    let text: Vec<String> = widest(counts)
+        .into_iter()
+        .take(6)
+        .map(|((from, to), by)| {
+            let by: Vec<String> = by
+                .iter()
+                .take(4)
+                .map(|&(how, id, n)| {
+                    let (name, stores, by_address) = names.get(&(how, id)).cloned().unwrap_or_default();
+                    format!(
+                        "{} {name} {:.1}x (stores to buffers {stores}, by address {by_address})",
+                        if how == 0 { "a view in a table of" } else { "a root view of" },
+                        n as f64 / frames
+                    )
+                })
+                .collect();
+            format!("{from:#x}+{:#x} ({:.1} MB) by {}", to - from, (to - from) as f64 / (1 << 20) as f64, by.join(", "))
+        })
+        .collect();
+    tracing::info!(
+        "shader writes declared (VICTORY_WRITE_DECLARERS=1), the widest ranges since the last line and what declares them: {}",
+        text.join("; ")
+    );
+}
+
+/// [`declared_by`]'s counts by range, the widest first (each is compared
+/// whole after a submission that declares it, however often it is declared
+/// there), and in each what declared it, the most often first.
+#[cfg(feature = "diagnostics")]
+fn widest(counts: Declarers) -> Vec<((usize, usize), Vec<(u8, usize, u64)>)> {
+    let mut ranges: std::collections::HashMap<(usize, usize), Vec<(u8, usize, u64)>> = std::collections::HashMap::new();
+    for ((from, to, how, id), n) in counts {
+        ranges.entry((from, to)).or_default().push((how, id, n));
+    }
+    let mut ranges: Vec<_> = ranges.into_iter().collect();
+    ranges.sort_unstable_by_key(|((from, to), _)| (std::cmp::Reverse(to - from), *from));
+    for (_, by) in &mut ranges {
+        by.sort_unstable_by_key(|b| (std::cmp::Reverse(b.2), b.0, b.1));
+    }
+    ranges
+}
+
+#[cfg(all(test, feature = "diagnostics"))]
+mod declarers_tests {
+    use super::*;
+
+    #[test]
+    fn the_widest_range_comes_first_with_its_most_frequent_declarer() {
+        let mut counts = Declarers::new();
+        counts.insert((0x1000, 0x2000, 0, 7), 3);
+        counts.insert((0x0, 0xae0_0000, 0, 9), 2);
+        counts.insert((0x0, 0xae0_0000, 1, 4), 40);
+        counts.insert((0x0, 0xae0_0000, 0, 7), 1);
+        let w = widest(counts);
+        assert_eq!(w[0].0, (0x0, 0xae0_0000));
+        assert_eq!(w[0].1, vec![(1, 4, 40), (0, 9, 2), (0, 7, 1)]);
+        assert_eq!(w[1], ((0x1000, 0x2000), vec![(0, 7, 3)]));
+    }
+
+    #[test]
+    fn narrow_declarations_are_not_kept() {
+        declared(0x5000, (1 << 20) - 1, 0, 0);
+        let kept = DECLARERS.lock().unwrap().as_ref().is_some_and(|(c, _)| c.keys().any(|k| k.0 == 0x5000));
+        assert!(!kept);
+    }
+}
+
 #[cfg(feature = "diagnostics")]
 fn blame(kind: &'static str, written: &[(usize, usize)], at: usize, len: usize) {
     let i = written.partition_point(|r| r.1 <= at);
@@ -3902,6 +4041,8 @@ pub(crate) mod rtstamps;
 mod rtbench;
 #[cfg(feature = "diagnostics")]
 mod stamps;
+#[cfg(feature = "diagnostics")]
+mod liststamps;
 #[cfg(feature = "diagnostics")]
 pub(crate) use stamps::{timeline_ready, timeline_restart, timeline_stamps};
 
@@ -5957,6 +6098,10 @@ impl Host {
             lists.push(Some(behind));
             firsts.iter_mut().for_each(|first| *first += 1);
         }
+        // A stamp of the card's between the runs of lists of each kind
+        // (`VICTORY_LIST_STAMPS=1`), in the calls they go in.
+        #[cfg(feature = "diagnostics")]
+        let list_stamps = late && liststamps::on() && liststamps::put(&mut lists, &marks, &mut firsts).is_some();
         #[cfg(feature = "diagnostics")]
         let sending = crate::timeline::ticks();
         if late {
@@ -5977,6 +6122,10 @@ impl Host {
                 }
                 self.queue.Signal(&self.fence, *submitted)
             };
+            #[cfg(feature = "diagnostics")]
+            if list_stamps {
+                liststamps::sent(*submitted);
+            }
             awake::sent(&self.device);
             #[cfg(feature = "diagnostics")]
             crate::timeline::sent(sending, *submitted, stamp);
@@ -9397,6 +9546,10 @@ impl Meter {
             rec::line(frames);
             #[cfg(feature = "diagnostics")]
             spans::line(frames);
+            #[cfg(feature = "diagnostics")]
+            liststamps::line(frames);
+            #[cfg(feature = "diagnostics")]
+            declarers_line(frames);
             crate::shadow::back_line(frames);
             #[cfg(feature = "diagnostics")]
             split_line(frames);
