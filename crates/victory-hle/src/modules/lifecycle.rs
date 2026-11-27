@@ -261,6 +261,16 @@ extern "system" fn window_proc(
     if message == wm::WM_SYSCOMMAND && wparam & 0xFFF0 == wm::SC_KEYMENU as usize {
         return 0;
     }
+    // Mouse look (`VICTORY_MOUSE_LOOK=1`) holds the pointer: none over the
+    // picture.
+    if message == wm::WM_SETCURSOR
+        && (lparam & 0xFFFF) as u32 == wm::HTCLIENT
+        && super::gameinput::mouse_captured()
+    {
+        // SAFETY: plain call; no cursor.
+        unsafe { wm::SetCursor(std::ptr::null_mut()) };
+        return 1;
+    }
     // SAFETY: the procedure `hook` stored, called the way the system would.
     unsafe {
         let title = wm::GetPropW(hwnd, TITLE_PROC);

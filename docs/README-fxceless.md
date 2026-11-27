@@ -280,6 +280,32 @@ title's window has focus:
 | F / H | stick clicks |
 | Esc, Tab | Menu, View |
 
+`VICTORY_BINDS=rockstar` lays the keys out after the PC defaults of GTA V
+(and RDR2 where the two agree), on GTA V's pad buttons. It has an on-foot
+and a driving layout; F (enter or leave a vehicle) switches between them,
+and F7 switches without pressing Y, should the two get out of step.
+
+| Keys | On foot | Driving |
+|------|---------|---------|
+| W A S D | left stick | W / S: RT / LT (pedals), A D: steer |
+| mouse buttons (with mouse look) | left: RT (fire), right: LT (aim), middle: R3 | left: RB, right: LB (drive-by) |
+| Left Shift, Space | A (sprint), X (jump) | -, RB (handbrake) |
+| R, E, Q, Tab | B (reload, melee), D-pad right (context), RB (cover), LB (weapon wheel) | B (cinematic camera), L3 (horn), D-pad left (radio), LB |
+| Left Ctrl, H | L3 (stealth) | -, D-pad right (headlights) |
+| F, C, V | Y (vehicle), R3 (look behind), View (camera) | the same |
+| Enter, Backspace, Esc / P / M, arrows, Z | A, B, Menu, D-pad, D-pad down | the same |
+| I J K L | right stick | the same |
+
+`VICTORY_MOUSE_LOOK=1` turns the mouse's travel (raw input, unaccelerated)
+into the right stick while the title's window has focus; the pointer is
+held at the window's centre and hidden, F8 lets it go and takes it again,
+and losing focus lets it go. `VICTORY_MOUSE_SENS` (default 1: 1000 counts a
+second is a full deflection), `VICTORY_MOUSE_INVERT=1` (vertical) and
+`VICTORY_MOUSE_DEAD` (default 0.2, where the title's stick dead zone is
+taken to end) tune it. `VICTORY_MOUSE_DEVICE=1` also reports a GameInput
+mouse device to the title, to find out whether it reads one; the log says
+`title asks for input kind` for each kind the title asks for.
+
 ## Commands
 
 ```
