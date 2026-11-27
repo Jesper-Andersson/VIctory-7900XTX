@@ -366,6 +366,13 @@ pub(crate) fn resident(device: &ID3D12Device, object: &impl Interface) -> window
 /// Times, microseconds and the longest of [`resident`].
 static RESIDENT: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
 
+/// Microseconds waited so far, all threads, in [`resident`] and in
+/// [`mapped`] (never reset; `crate::longframe`).
+#[cfg(feature = "diagnostics")]
+pub(crate) fn residency_waits_us() -> (u64, u64) {
+    (RESIDENT[1].load(Ordering::Relaxed), MAPPED[1].load(Ordering::Relaxed))
+}
+
 /// Whether memory the card was given stays with it while there is room (on
 /// by default; `VICTORY_KEEP_FREED=0`: it is given back as before). A shader
 /// that reads past a view (a raw load through a typed, structured or
@@ -7783,6 +7790,7 @@ impl HostList {
         {
             add(C::Copies, copies);
             add(C::CopyBytes, bytes);
+            add(C::CopyUs, us.as_micros() as u64);
             add(C::Refreshes, refreshes);
             add(C::RefreshBytes, refreshed);
             SPLIT[7].fetch_add(us.as_nanos() as u64, Ordering::Relaxed);

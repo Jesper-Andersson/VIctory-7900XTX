@@ -131,6 +131,9 @@ pub(crate) enum C {
     WaitsForGroups,
     WaitsForBuffers,
     IndirectBounded,
+    /// Microseconds of the title copies counted in `CopyBytes` (the copy and
+    /// fill steps of submissions).
+    CopyUs,
 }
 const COUNTERS: usize = 80;
 /// One of some sets of counters, each in lines of the processor's memory of
@@ -172,7 +175,76 @@ pub(crate) fn peek(c: C) -> u64 {
 
 /// Counter `i`, all sets together, from now on 0.
 fn taken(i: usize) -> u64 {
-    COUNT.iter().map(|b| b.0[i].swap(0, Relaxed)).sum()
+    let n = COUNT.iter().map(|b| b.0[i].swap(0, Relaxed)).sum();
+    // What the lines took, for running totals (`crate::longframe`).
+    CARRIED[i].fetch_add(n, Relaxed);
+    n
+}
+
+/// Of each counter, what [`taken`] has taken so far.
+static CARRIED: [AtomicU64; COUNTERS] = [const { AtomicU64::new(0) }; COUNTERS];
+
+/// Held while [`log`] takes the counters and while a long frame's totals
+/// are read: a total read between a counter's taking and its carrying would
+/// be short by the whole line's worth, which the next frame would then get.
+static TAKING: Mutex<()> = Mutex::new(());
+
+/// Counter `c` since the start (what was taken and what is there now).
+fn total(c: C) -> u64 {
+    let i = c as usize;
+    CARRIED[i].load(Relaxed) + COUNT.iter().map(|b| b.0[i].load(Relaxed)).sum::<u64>()
+}
+
+/// The running totals of a long frame's line, now ([`crate::longframe`]).
+fn long_frame_sample() -> crate::longframe::Sample {
+    let (user_us, kernel_us) = process_times();
+    let (resident_us, mapped_us) = crate::host::residency_waits_us();
+    let page_faults = page_faults();
+    let _taking = TAKING.lock().unwrap_or_else(|e| e.into_inner());
+    crate::longframe::Sample {
+        resident_us,
+        mapped_us,
+        at_us: now_us(),
+        until_record_us: total(C::UntilRecordUs),
+        until_submit_us: total(C::UntilSubmitUs),
+        tail_us: total(C::TailUs),
+        record_ns: total(C::RecordNs),
+        pipeline_wait_us: total(C::PipelineWaitUs),
+        pace_us: total(C::PaceUs),
+        copy_us: total(C::CopyUs),
+        copy_bytes: total(C::CopyBytes),
+        steps_us: total(C::RunUs),
+        refreshes: total(C::Refreshes),
+        refresh_named_bytes: total(C::RefreshBytes),
+        checked_bytes: total(C::Checked),
+        unchanged_bytes: total(C::Unchanged),
+        whole_bytes: total(C::WholeBytes),
+        texture_uploads: total(C::TexUploads),
+        card_wait_us: total(C::CardUnder2Us) + total(C::Card2To8Us) + total(C::Card8To32Us) + total(C::CardOver32Us),
+        back_us: total(C::BackScanUs) + total(C::BackSyncUs),
+        page_faults,
+        user_us,
+        kernel_us,
+    }
+}
+
+/// At a present with `VICTORY_LONG_FRAMES` on: the line of the frame that
+/// ends here, if it was long ([`crate::longframe`]).
+fn long_frame_at_present(threshold: f64) {
+    static LAST: Mutex<Option<crate::longframe::Sample>> = Mutex::new(None);
+    let now = long_frame_sample();
+    let before = LAST.lock().unwrap_or_else(|e| e.into_inner()).replace(now);
+    let Some(before) = before else {
+        return;
+    };
+    let frame = now.since(&before);
+    if (frame.at_us as f64) < threshold * 1e3 {
+        return;
+    }
+    let free = crate::host::available_physical_ram().map(|b| b >> 20);
+    if let Some(text) = crate::longframe::line(&frame, threshold, free, crate::pipeline::making()) {
+        tracing::info!("{text}");
+    }
 }
 
 /// How copies run: 0 guarded (as always), 1 plain, 2 not at all.
@@ -1236,6 +1308,9 @@ pub(crate) fn present_begins() {
 /// A frame was presented.
 pub(crate) fn presented() {
     add(C::Frames, 1);
+    if let Some(threshold) = crate::longframe::threshold() {
+        long_frame_at_present(threshold);
+    }
     PRESENTED_AT.store(now_us(), Relaxed);
     RECORDED_SINCE.store(false, Relaxed);
     SUBMITTED_SINCE.store(false, Relaxed);
@@ -1261,12 +1336,14 @@ fn page_faults() -> u64 {
 /// second or more: a 4 s frame after an unlogged 4 s frame showed two
 /// frames' counts as one's).
 pub(crate) fn log(frames: f64) {
+    let taking = TAKING.lock().unwrap_or_else(|e| e.into_inner());
     let counted = taken(C::Frames as usize);
     let frames = if counted > 0 { counted as f64 } else { frames };
     static FAULTS: AtomicU64 = AtomicU64::new(0);
     let faults = page_faults();
     let faults = faults - FAULTS.swap(faults, Relaxed).min(faults);
     let c: Vec<f64> = (0..COUNTERS).map(|i| taken(i) as f64 / frames).collect();
+    drop(taking);
     let mb = |v: f64| v / 1e6;
     let ms = |v: f64| v / 1e3;
     tracing::info!(

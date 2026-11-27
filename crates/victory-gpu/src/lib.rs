@@ -45,6 +45,8 @@ pub mod fence;
 pub mod frame;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod book;
+#[cfg_attr(not(all(windows, feature = "diagnostics")), allow(dead_code))]
+mod longframe;
 #[cfg(windows)]
 mod host;
 #[cfg(windows)]
