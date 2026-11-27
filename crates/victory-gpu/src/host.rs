@@ -2931,6 +2931,56 @@ fn join_ranges(ranges: &mut Vec<(usize, usize)>, more: impl IntoIterator<Item = 
 #[cfg(feature = "diagnostics")]
 static IN_PLACE_AIR: Mutex<Vec<(u64, Vec<(usize, usize)>)>> = Mutex::new(Vec::new());
 
+/// Diagnostics (#379): a range of title memory in place that a flight's
+/// lists read on the card, with a fingerprint of its bytes when the
+/// submission was prepared.
+#[cfg(feature = "diagnostics")]
+struct Read {
+    at: usize,
+    len: usize,
+    print: u64,
+    /// Found changed once: not counted again.
+    changed: bool,
+}
+
+/// Diagnostics (#379): fingerprints taken while a submission was prepared,
+/// by its number, until [`Host::send_late`] knows its fence value.
+#[cfg(feature = "diagnostics")]
+static READS_PREPARED: Mutex<Vec<(u64, Vec<Read>)>> = Mutex::new(Vec::new());
+
+/// Diagnostics (#379): per flight sent, the value signalled behind it and
+/// what its lists read in place ([`Read`]), until the card has passed it.
+#[cfg(feature = "diagnostics")]
+static READS_AIR: Mutex<Vec<(u64, Vec<Read>)>> = Mutex::new(Vec::new());
+
+/// Diagnostics (#379): the largest range fingerprinted
+/// (`VICTORY_PORT_WATCH_KB`, 64 KiB if unset: constant buffers, small
+/// vertex and index buffers), and the bytes fingerprinted per submission
+/// at most, when it is prepared and when flights are looked at again.
+#[cfg(feature = "diagnostics")]
+fn watch_limits() -> (usize, usize) {
+    static LIMITS: OnceLock<(usize, usize)> = OnceLock::new();
+    *LIMITS.get_or_init(|| {
+        let kb = std::env::var("VICTORY_PORT_WATCH_KB").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(64);
+        (kb << 10, 4 << 20)
+    })
+}
+
+/// Diagnostics (#379): a fingerprint of `len` bytes of title memory at
+/// `at` (read through the kernel: pages not mapped read as zeros).
+#[cfg(feature = "diagnostics")]
+fn fingerprint(at: usize, len: usize, scratch: &mut Vec<u8>) -> u64 {
+    scratch.clear();
+    scratch.resize(len.next_multiple_of(8), 0);
+    copy_mapped(scratch.as_mut_ptr(), at as *const u8, len, false);
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ len as u64;
+    for word in scratch.chunks_exact(8) {
+        let w = u64::from_le_bytes(word.try_into().unwrap_or_default());
+        h = (h ^ w).wrapping_mul(0x0000_0100_0000_01b3).rotate_left(29);
+    }
+    h
+}
+
 #[cfg(feature = "diagnostics")]
 impl Host {
     /// Diagnostics (#379): counts the steps of `runs` done on the CPU (not
@@ -2941,10 +2991,19 @@ impl Host {
     /// nowhere (`Shadow::gpu_writes`), so nothing waits for them; the bytes
     /// read are the ones from before those writes. Counted in
     /// [`crate::port::STALE`] for the frame line.
-    fn in_place_stale(&self, runs: &[&HostList], taken: impl Fn(&HostList, usize) -> bool) {
+    ///
+    /// With `late` (the submission becomes a flight, `number` its number)
+    /// it also fingerprints the small ranges of memory in place that its
+    /// lists read on the card, and looks again at those of flights not
+    /// finished: a range found changed, where no shader write of ours may
+    /// have changed it, was written by the title (or by the CPU otherwise)
+    /// while the card may still read it. Counted in [`crate::port::TITLE`].
+    fn in_place_stale(&self, runs: &[&HostList], taken: impl Fn(&HostList, usize) -> bool, number: u64, late: bool) {
         use crate::port::STALE;
         // SAFETY: a plain query.
         let completed = unsafe { self.fence.GetCompletedValue() };
+        let mut scratch = Vec::new();
+        self.in_place_looked_again(completed, &mut scratch);
         let (air, flights) = {
             let mut all = IN_PLACE_AIR.lock().unwrap_or_else(|e| e.into_inner());
             all.retain(|(fence, _)| *fence > completed);
@@ -2992,6 +3051,87 @@ impl Host {
             let written: Vec<(usize, usize)> = mine.iter().map(|w| (w.1, w.2)).collect();
             drop(deferred);
             join_ranges(&mut ahead, written);
+        }
+        if late {
+            // `ahead` holds all this submission's writes in place now.
+            self.in_place_reads(runs, number, &air, &ahead, &mut scratch);
+        }
+    }
+
+    /// Diagnostics (#379): fingerprints what `runs` read in place on the
+    /// card ([`Step::Refresh`] of a buffer in place), but for ranges shaders
+    /// of ours may write (`air`, `own`).
+    fn in_place_reads(
+        &self,
+        runs: &[&HostList],
+        number: u64,
+        air: &[(usize, usize)],
+        own: &[(usize, usize)],
+        scratch: &mut Vec<u8>,
+    ) {
+        use crate::port::TITLE;
+        let (most, budget) = watch_limits();
+        let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+        let (mut reads, mut spent) = (Vec::new(), 0usize);
+        for &list in runs {
+            let deferred = list.deferred();
+            for step in &deferred.copies {
+                let Step::Refresh(shadow, at, len) = step else { continue };
+                let (at, len) = (*at, *len);
+                if !shadow.in_place() || len == 0 || !seen.insert((at, len)) {
+                    continue;
+                }
+                if len > most || spent + len > budget {
+                    TITLE[2].fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                if touches(air, at, at + len) || touches(own, at, at + len) {
+                    TITLE[3].fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                spent += len;
+                reads.push(Read { at, len, print: fingerprint(at, len, scratch), changed: false });
+            }
+        }
+        TITLE[0].fetch_add(reads.len() as u64, Ordering::Relaxed);
+        TITLE[1].fetch_add(spent as u64, Ordering::Relaxed);
+        if !reads.is_empty() {
+            READS_PREPARED.lock().unwrap_or_else(|e| e.into_inner()).push((number, reads));
+        }
+    }
+
+    /// Diagnostics (#379): flights the card has passed are let go; of the
+    /// others, ranges not found changed yet are fingerprinted again (up to
+    /// the budget per call, the oldest flights first).
+    fn in_place_looked_again(&self, completed: u64, scratch: &mut Vec<u8>) {
+        use crate::port::TITLE;
+        let (_, budget) = watch_limits();
+        let air: Vec<(usize, usize)> = {
+            let all = IN_PLACE_AIR.lock().unwrap_or_else(|e| e.into_inner());
+            let mut joined = Vec::new();
+            join_ranges(&mut joined, all.iter().filter(|(f, _)| *f > completed).flat_map(|(_, r)| r.iter().copied()));
+            joined
+        };
+        let mut flights = READS_AIR.lock().unwrap_or_else(|e| e.into_inner());
+        flights.retain(|(fence, _)| *fence > completed);
+        let mut spent = 0usize;
+        'flights: for (_, reads) in flights.iter_mut() {
+            for read in reads.iter_mut().filter(|r| !r.changed) {
+                if spent + read.len > budget {
+                    break 'flights;
+                }
+                spent += read.len;
+                TITLE[4].fetch_add(1, Ordering::Relaxed);
+                TITLE[5].fetch_add(read.len as u64, Ordering::Relaxed);
+                if fingerprint(read.at, read.len, scratch) != read.print {
+                    read.changed = true;
+                    // A flight's shader writing it in place since is ours.
+                    if !touches(&air, read.at, read.at + read.len) {
+                        TITLE[6].fetch_add(1, Ordering::Relaxed);
+                        TITLE[7].fetch_add(read.len as u64, Ordering::Relaxed);
+                    }
+                }
+            }
         }
     }
 }
@@ -5504,6 +5644,17 @@ impl Host {
             if !ranges.is_empty() {
                 IN_PLACE_AIR.lock().unwrap_or_else(|e| e.into_inner()).push((*submitted, ranges));
             }
+            // What it reads in place, fingerprinted while it was prepared.
+            let reads = {
+                let mut prepared = READS_PREPARED.lock().unwrap_or_else(|e| e.into_inner());
+                let found = prepared.iter().position(|(n, _)| *n == sent.number).map(|i| prepared.swap_remove(i).1);
+                // Any left from submissions not sent as flights.
+                prepared.retain(|(n, _)| *n > sent.number);
+                found
+            };
+            if let Some(reads) = reads {
+                READS_AIR.lock().unwrap_or_else(|e| e.into_inner()).push((*submitted, reads));
+            }
         }
         let sizes = crate::memory::asked_sizes(order.iter().map(|&i| lists[i].host()));
         let most = {
@@ -5953,7 +6104,7 @@ impl Host {
         let air = line().written.clone();
         #[cfg(feature = "diagnostics")]
         if crate::port::on() {
-            self.in_place_stale(runs, |list, i| own.as_ref().is_some_and(|own| own.takes(list, i)));
+            self.in_place_stale(runs, |list, i| own.as_ref().is_some_and(|own| own.takes(list, i)), this_submission, late);
         }
         stage.next("submit: refreshes ahead of writes");
         if refresh_front() {

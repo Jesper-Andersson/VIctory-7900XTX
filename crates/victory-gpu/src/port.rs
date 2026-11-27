@@ -326,8 +326,31 @@ pub(crate) fn log(frames: f64) {
             t[6] / t[7].max(1e-9),
             std::env::var("VICTORY_SUBMIT_FRAMES").unwrap_or_else(|_| "1".into()),
         );
+        let w: Vec<f64> = TITLE.iter().map(|s| s.swap(0, Ordering::Relaxed) as f64 / frames).collect();
+        tracing::info!(
+            "renderer port 1, memory in place changed under the card (#379), per frame: {:.1} ranges the card reads in place fingerprinted \
+             ({:.1} KB; {:.1} left out: over the size limit or past the budget, {:.1} left out: shaders write them); looked at again while \
+             their flight was not finished: {:.1} ({:.1} KB); of those changed, by no shader write of ours: {:.2} ranges ({:.2} KB)",
+            w[0],
+            w[1] / 1024.0,
+            w[2],
+            w[3],
+            w[4],
+            w[5] / 1024.0,
+            w[6],
+            w[7] / 1024.0,
+        );
     }
 }
+
+/// Diagnostics (#379): title memory in place that the card reads, its bytes
+/// fingerprinted when a submission is prepared and again while its flight
+/// is not finished. Ranges fingerprinted (0) and their bytes (1); left out
+/// for size or budget (2); left out because shaders of ours write them (3);
+/// looked at again (4) and their bytes (5); found changed, not by a shader
+/// write of ours (6) and their bytes (7).
+#[cfg(feature = "diagnostics")]
+pub(crate) static TITLE: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 
 /// Diagnostics (#379): steps done on the CPU that touch memory in place (0);
 /// that read bytes a flight not finished writes in place (1: steps, 2:
