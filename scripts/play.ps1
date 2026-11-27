@@ -3,6 +3,7 @@
 # -Safe         without the newer, faster ways (the first thing to try when something is wrong)
 # -RayTracing   the title's own ray-traced indirect light: lit interiors, about a third slower
 # -Fsr4K        PC FidelityFX 4.1.2 at 3840x2160 (quality, balanced or performance)
+# -SkipIntro    the logos and the intro movie are skipped (VICTORY_SKIP_BINK=1): faster to the menus
 # -Build        target\diag (the default, the build all measurements are of) or target\release
 # -More         other settings: -More @{VICTORY_PANEL='1'}
 # Run it from a normal window, not as administrator: the driver then keeps its shader cache elsewhere.
@@ -11,6 +12,7 @@ param(
     [switch]$Safe,
     [switch]$RayTracing,
     [ValidateSet('quality', 'balanced', 'performance')][string]$Fsr4K,
+    [switch]$SkipIntro,
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
     [hashtable]$More = @{}
 )
@@ -27,6 +29,7 @@ if ($Safe) {
 }
 if ($RayTracing) { $settings.VICTORY_BVH_BUILDER = '1' }
 if ($Fsr4K) { $settings.VICTORY_FSR_4K = $Fsr4K.ToLowerInvariant() }
+if ($SkipIntro) { $settings.VICTORY_SKIP_BINK = '1' }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
 $victory = Join-Path $PSScriptRoot "..\target\$Build\victory.exe"
