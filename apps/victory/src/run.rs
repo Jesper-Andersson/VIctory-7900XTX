@@ -39,6 +39,30 @@ fn check_cpu_features() -> Result<()> {
     check_cpu_features_with(has_avx2, skip.as_deref())
 }
 
+/// `VICTORY_PROMPTS=keys`: places the hook that hands the title key caps for
+/// its button pictures (imjustprism, Marvisak/VIctory#3433), and says
+/// whether it is placed. Before the title starts.
+#[cfg(windows)]
+fn show_keys_in_prompts(
+    image: &victory_loader::LoadedImage,
+    build: Option<&victory_game::KnownBuild>,
+) {
+    let Some(build) = build else {
+        println!("prompts        gamepad pictures: the keys need a known build");
+        return;
+    };
+    let Some(offsets) = build.key_prompts else {
+        println!("prompts        gamepad pictures: no keys for {}", build.label);
+        return;
+    };
+    // SAFETY: the image of the build the offsets belong to is mapped and
+    // bound, and no title thread runs yet.
+    match unsafe { victory_game::prompts::hook::install(image, offsets) } {
+        Ok(()) => println!("prompts        keyboard keys: hook placed"),
+        Err(refused) => println!("prompts        gamepad pictures: {refused}"),
+    }
+}
+
 #[cfg(windows)]
 pub fn run(
     exe: &Path,
@@ -185,6 +209,15 @@ pub fn run(
     }
     let exe_name = exe.file_name().unwrap_or_default().to_string_lossy();
     show(&exe_name, image.bind_imports(&with_dlls, policy)?);
+    // VICTORY_PROMPTS=keys: the title's button prompts show the keys of the
+    // stand-in pad (VICTORY_BINDS) instead of gamepad pictures.
+    if std::env::var("VICTORY_PROMPTS").is_ok_and(|v| v.trim() == "keys") {
+        if execute {
+            show_keys_in_prompts(&image, victory_game::identify(&hash));
+        } else {
+            println!("prompts        keyboard keys: the hook is placed only with --execute");
+        }
+    }
     if execute {
         let size = image.info().size_of_image as usize;
         // SAFETY: the image stays mapped, and nothing of it has run yet.

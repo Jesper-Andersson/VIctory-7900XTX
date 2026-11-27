@@ -306,6 +306,15 @@ taken to end) tune it. `VICTORY_MOUSE_DEVICE=1` also reports a GameInput
 mouse device to the title, to find out whether it reads one; the log says
 `title asks for input kind` for each kind the title asks for.
 
+`VICTORY_PROMPTS=keys` (Series 1.0.2.1 only) draws key caps over the
+title's button prompts: each pad picture becomes the key the bind table in
+force (`VICTORY_BINDS`) gives that control, outlined at run time from the
+host's Segoe UI; nothing of the game is stored. The icon movie is drawn
+once, so prompts show the layout in force then (on foot, for the rockstar
+binds); a control without a key keeps its picture. By imjustprism
+(Marvisak/VIctory#3433). The log says `prompts: key caps drawn into the
+icon movie` and `prompts: the title loads the icon movie with key caps`.
+
 ## Commands
 
 ```
