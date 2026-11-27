@@ -121,7 +121,6 @@ const ROCKSTAR_COMMON: &[(u8, Bind)] = &[
     (VK_ESCAPE, C(P::Menu)),
     (b'P', C(P::Menu)),
     (b'M', C(P::Menu)),
-    (VK_RETURN, C(P::A)),
     (VK_BACK, C(P::B)),
     (VK_UP, C(P::Up)),
     (VK_DOWN, C(P::Down)),
@@ -145,10 +144,14 @@ const ROCKSTAR_COMMON: &[(u8, Bind)] = &[
 const ROCKSTAR_FOOT: &[(u8, Bind)] = &[
     (b'W', C(P::LeftStickUp)),
     (b'S', C(P::LeftStickDown)),
+    // E presses the pad's A (confirm, interact) and is the key its prompts show;
+    // Enter does the same in menus. D-pad right, GTA V's context action, stays on
+    // the right arrow.
+    (b'E', C(P::A)),
+    (VK_RETURN, C(P::A)),
     (VK_LSHIFT, C(P::A)),               // sprint
     (VK_SPACE, C(P::X)),                // jump, climb
     (b'R', C(P::B)),                    // reload, melee
-    (b'E', C(P::Right)),                // context action, talk
     (b'Q', C(P::RightShoulder)),        // cover
     (VK_TAB, C(P::LeftShoulder)),       // weapon wheel
     (VK_LCONTROL, C(P::LeftStick)),     // stealth, crouch
@@ -159,6 +162,7 @@ const ROCKSTAR_FOOT: &[(u8, Bind)] = &[
 
 /// Driving: W and S are the pedals, Space the handbrake.
 const ROCKSTAR_DRIVE: &[(u8, Bind)] = &[
+    (VK_RETURN, C(P::A)),
     (b'W', C(P::RightTrigger)),         // accelerate
     (b'S', C(P::LeftTrigger)),          // brake, reverse
     (VK_SPACE, C(P::RightShoulder)),    // handbrake
@@ -270,7 +274,7 @@ mod tests {
 
         let foot = |c| Binds::Rockstar.key(false, c);
         // Menu keys first where a control has several.
-        assert_eq!(foot(P::A), Some(VK_RETURN));
+        assert_eq!(foot(P::A), Some(b'E'));
         assert_eq!(foot(P::B), Some(VK_BACK));
         assert_eq!(foot(P::Menu), Some(VK_ESCAPE));
         assert_eq!(foot(P::Down), Some(VK_DOWN));
@@ -287,6 +291,7 @@ mod tests {
         assert_eq!(foot(P::LeftStickUp), Some(b'W'));
 
         let drive = |c| Binds::Rockstar.key(true, c);
+        assert_eq!(drive(P::A), Some(VK_RETURN));
         assert_eq!(drive(P::RightTrigger), Some(b'W'));
         assert_eq!(drive(P::LeftTrigger), Some(b'S'));
         assert_eq!(drive(P::RightShoulder), Some(VK_SPACE));

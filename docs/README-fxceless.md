@@ -290,10 +290,11 @@ and F7 switches without pressing Y, should the two get out of step.
 | W A S D | left stick | W / S: RT / LT (pedals), A D: steer |
 | mouse buttons (with mouse look) | left: RT (fire), right: LT (aim), middle: R3 | left: RB, right: LB (drive-by) |
 | Left Shift, Space | A (sprint), X (jump) | -, RB (handbrake) |
-| R, E, Q, Tab | B (reload, melee), D-pad right (context), RB (cover), LB (weapon wheel) | B (cinematic camera), L3 (horn), D-pad left (radio), LB |
+| E | A (confirm, interact; the key A's prompts show) | L3 (horn) |
+| R, Q, Tab | B (reload, melee), RB (cover), LB (weapon wheel) | B (cinematic camera), D-pad left (radio), LB |
 | Left Ctrl, H | L3 (stealth) | -, D-pad right (headlights) |
 | F, C, V | Y (vehicle), R3 (look behind), View (camera) | the same |
-| Enter, Backspace, Esc / P / M, arrows, Z | A, B, Menu, D-pad, D-pad down | the same |
+| Enter, Backspace, Esc / P / M, arrows, Z | A, B, Menu, D-pad (right arrow: D-pad right, GTA V's context action), D-pad down | the same |
 | I J K L | right stick | the same |
 
 `VICTORY_MOUSE_LOOK=1` turns the mouse's travel (raw input, unaccelerated)

@@ -2232,10 +2232,11 @@ mod tests {
         let p = pad(&[b'W', LSHIFT, SPACE], captured(0b11));
         assert_eq!((p.left_y, p.buttons), (1.0, A | X));
         assert_eq!((p.left_trigger, p.right_trigger), (1.0, 1.0));
+        // E is A on foot (confirm, interact); D-pad right is the right arrow.
         let p = pad(&[b'R', b'E', b'Q', TAB, LCTRL, b'C', b'V'], captured(0));
         assert_eq!(
             p.buttons,
-            B | RIGHT | RIGHT_SHOULDER | LEFT_SHOULDER | LEFT_STICK | RIGHT_STICK | VIEW
+            B | A | RIGHT_SHOULDER | LEFT_SHOULDER | LEFT_STICK | RIGHT_STICK | VIEW
         );
         // Mouse buttons need the pointer to be ours.
         let p = pad(&[], MouseInput { buttons: 0b01, ..Default::default() });

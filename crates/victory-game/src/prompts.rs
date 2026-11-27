@@ -981,7 +981,7 @@ mod tests {
         assert_eq!(classic(P::LeftShoulder), Some("Q"));
         assert_eq!(classic(P::RightTrigger), Some("C"));
         let foot = |c| control_label(Binds::Rockstar, false, c);
-        assert_eq!(foot(P::A), Some("\u{21B5}"));
+        assert_eq!(foot(P::A), Some("E"));
         assert_eq!(foot(P::X), Some("Space"));
         assert_eq!(foot(P::Y), Some("F"));
         assert_eq!(foot(P::LeftShoulder), Some("Tab"));
@@ -995,6 +995,7 @@ mod tests {
         assert_eq!(drive(P::LeftTrigger), Some("S"));
         assert_eq!(drive(P::RightShoulder), Some("Space"));
         assert_eq!(drive(P::LeftStick), Some("E"));
+        assert_eq!(drive(P::A), Some("\u{21B5}"));
         assert_eq!(drive(P::X), None);
     }
 
